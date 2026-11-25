@@ -50,5 +50,5 @@ export async function localApi(path, input) {
 export async function prepareOffline() {
   if (!navigator.serviceWorker) throw new Error('这个地址无法安装离线拾页，请使用 HTTPS 网址。');
   await navigator.serviceWorker.register('./sw.js');
-  await navigator.serviceWorker.ready;
+  return navigator.serviceWorker.ready;
 }

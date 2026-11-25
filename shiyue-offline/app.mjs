@@ -1,5 +1,5 @@
 import { idOf, norm, filterRows, formatExport, workUrl, authorUrl, statuses, tagSources, availableTitles,
-  bilingualTitle, catalogAuthors, catalogTags, isHiddenTag, seriesKey, seriesUrl } from './model.mjs';
+  bilingualTitle, catalogAuthors, catalogTags, isHiddenTag, seriesKey, seriesUrl, novelIdFrom as parseNovel } from './model.mjs';
 
 // BEGIN GENERATED LUCIDE ICONS
 // Lucide 0.468.0 (https://github.com/lucide-icons/lucide), f12b0de177fbc2a6795e99be065887e72b237123. See lucide-license.txt.
@@ -8,7 +8,7 @@ const glyphs = {"user":[{"tag":"circle","attributes":{"cx":"12","cy":"8","r":"5"
 
 const $ = (id) => document.getElementById(id);
 const offlineEdition = document.documentElement.dataset.shelf === 'offline';
-let offlineStore;
+let offlineStore, mobileServices, mobileLookup;
 const element = (tag, text, cls) => {
   const item = document.createElement(tag);
   if (text !== undefined) item.textContent = text;
@@ -217,13 +217,15 @@ function appendTitle(node, row) {
 }
 function rowNode(row) {
   const line = element('li', undefined, `row${picked.has(row.id) ? ' selected' : ''}`);
+  line.dataset.cover = String(Number(row.id.slice(-2)) % 4);
   const mark = element('input');
   mark.type = 'checkbox';
   mark.checked = picked.has(row.id);
   mark.setAttribute('aria-label', `勾选 ${bilingualTitle(row)}`);
   mark.onchange = () => { if (mark.checked) picked.add(row.id); else picked.delete(row.id); line.classList.toggle('selected', mark.checked); selection(); };
-  const center = element('div');
+  const center = element('div', undefined, 'row-copy');
   const title = element('h2');
+  title.dataset.imprint = `PIXIV / ${row.id}`;
   const titleControl = button('', () => openEditor(row.id), 'title-button');
   appendTitle(titleControl, row);
   title.append(titleControl);
@@ -249,7 +251,10 @@ function rowNode(row) {
   if (row.score) right.append(element('span', `★ ${row.score}`, 'starred'));
   right.append(button(row.repo ? '编辑 Repo' : '写 Repo', () => openEditor(row.id), 'repo-action', 'note'));
   right.append(originalLink(row));
-  line.append(mark, center, right);
+  const spine = element('span', undefined, `work-spine spine-${Number(row.id.slice(-2)) % 4}`);
+  spine.append(icon(row.favorite ? 'star' : 'book'));
+  spine.setAttribute('aria-hidden', 'true');
+  line.append(mark, spine, center, right);
   return line;
 }
 
@@ -316,6 +321,18 @@ function renderStats(counts, visible) {
     return control;
   }));
 }
+let shelfDisplay = 'covers';
+try { if (localStorage.getItem('shiyue-display') === 'list') shelfDisplay = 'list'; } catch { /* Optional preference. */ }
+function applyShelfDisplay(directory = view === 'authors') {
+  $('shelf-display').hidden = directory;
+  $('rows').dataset.display = directory ? 'list' : shelfDisplay;
+  for (const mode of ['list', 'covers']) $(`display-${mode}`).setAttribute('aria-pressed', String(mode === shelfDisplay));
+}
+for (const mode of ['list', 'covers']) $(`display-${mode}`).onclick = () => {
+  shelfDisplay = mode;
+  try { localStorage.setItem('shiyue-display', mode); } catch { /* Apply in memory. */ }
+  applyShelfDisplay();
+};
 function render(reset = false) {
   if (reset) page = 0;
   const rows = state.rows;
@@ -326,6 +343,7 @@ function render(reset = false) {
   }
   const folder = view.startsWith('folder:') && state.folders.find(({ id }) => `folder:${id}` === view);
   const directory = view === 'authors';
+  applyShelfDisplay(directory);
   for (const control of $('mobile-dock').children) {
     const current = control.dataset.dock === (view.startsWith('author:') ? 'authors' : view);
     if (current) control.setAttribute('aria-current', 'page'); else control.removeAttribute('aria-current');
@@ -341,6 +359,14 @@ function render(reset = false) {
   for (const row of rows) for (const id of row.folders) folderCounts.set(id, (folderCounts.get(id) ?? 0) + 1);
   const viewCount = series ? rows.filter((row) => seriesKey(row) === activeSeries).length : folder ? folderCounts.get(folder.id) : counts[viewIndex];
   renderStats(counts, overview);
+  $('shelf-tabs').replaceChildren(...[
+    ['all', '全部', counts[0]], ['favorite', '星标', counts[1]], ['repo', '已写', counts[2]], ['untranslated', '待译', counts[3]],
+  ].map(([id, label, count]) => {
+    const control = button(label, () => pickView(id), 'shelf-tab');
+    if (view === id && !series) control.setAttribute('aria-current', 'page');
+    control.append(element('span', count, 'tab-count'));
+    return control;
+  }));
   $('nav').replaceChildren(...views.map(([id, label, glyph], i) => navItem(id, label, glyph, counts[i])));
   $('folders').replaceChildren(...state.folders.map(({ id, name }) => navItem(`folder:${id}`, name, 'folder', folderCounts.get(id) ?? 0)));
   $('view-title').textContent = authorId ? author?.name || `作者 #${authorId}` : series?.series || folder?.name || views[viewIndex]?.[1] || '全部作品';
@@ -519,17 +545,10 @@ $('import-run').onclick = async () => {
   } catch (error) { note('import-note', error.message, true); }
   finally { $('import-run').disabled = false; }
 };
-function parseNovel(value) {
-  const direct = idOf(value.trim());
-  if (direct) return direct;
-  try {
-    const url = new URL(value.trim());
-    if (url.hostname === 'www.pixiv.net' && url.pathname === '/novel/show.php' && url.protocol === 'https:') return idOf(url.searchParams.get('id'));
-  } catch { /* Field validation reports invalid links. */ }
-  return '';
-}
 let lookedUpNovel = null;
 let manualRequest = 0;
+let manualLookupAbort;
+let manualTranslateAbort;
 function updateManualLink() {
   const id = parseNovel($('manual-id').value);
   $('manual-original').hidden = !id;
@@ -537,9 +556,10 @@ function updateManualLink() {
   else $('manual-original').removeAttribute('href');
 }
 function lockManual(locked) {
-  for (const id of ['manual-id', 'manual-authorid', 'manual-title', 'manual-author', 'lookup-novel', 'lookup-author', 'manual-save']) $(id).disabled = locked;
+  for (const id of ['manual-id', 'manual-authorid', 'manual-title', 'manual-author', 'manual-zh', 'lookup-novel', 'lookup-author', 'manual-translate', 'manual-save']) $(id).disabled = locked;
 }
 $('manual-id').oninput = () => {
+  $('manual-zh').value = '';
   if (lookedUpNovel) {
     if ($('manual-title').value === lookedUpNovel.title) $('manual-title').value = '';
     if ($('manual-author').value === lookedUpNovel.author) $('manual-author').value = '';
@@ -547,8 +567,14 @@ $('manual-id').oninput = () => {
     lookedUpNovel = null;
   }
   updateManualLink();
+  note('manual-note');
 };
-$('manual').addEventListener('close', () => { if (!$('manual').open) { manualRequest++; lockManual(false); } });
+$('manual-id').onkeydown = (event) => {
+  if (event.key !== 'Enter' || event.isComposing || event.repeat) return;
+  event.preventDefault();
+  if (!$('lookup-novel').disabled) fillManual();
+};
+$('manual').addEventListener('close', () => { if (!$('manual').open) { manualRequest++; manualLookupAbort?.abort(); manualTranslateAbort?.abort(); lockManual(false); } });
 $('add-open').onclick = () => { $('manual-form').reset(); lookedUpNovel = null; updateManualLink(); note('manual-note'); show('manual'); };
 async function fillManual(authorOnly = false) {
   const id = parseNovel($('manual-id').value);
@@ -559,9 +585,18 @@ async function fillManual(authorOnly = false) {
     return false;
   }
   const request = ++manualRequest;
+  const controller = new AbortController();
+  manualLookupAbort = controller;
   lockManual(true); note('manual-note', '正在查询资料…');
   try {
-    const data = await api('lookup', authorOnly ? { authorId } : { id, authorId });
+    const query = authorOnly ? { authorId } : { id, authorId };
+    let data;
+    try { data = await api('lookup', query); }
+    catch (error) {
+      if (!offlineEdition || error.status !== 404) throw error;
+      if (!mobileLookup) throw new Error('新作品的自动识别需要联网并配置 Pixiv 识别服务，也可以在下方手动填资料。');
+      data = await mobileServices.lookupMobile(mobileLookup, query, { signal: controller.signal });
+    }
     if (request !== manualRequest || !$('manual').open) return false;
     if (data.existing) { close('manual'); openEditor(id); return false; }
     if (authorOnly) $('manual-author').value = data.author;
@@ -571,12 +606,47 @@ async function fillManual(authorOnly = false) {
       if (lookedUpNovel.author) $('manual-author').value = lookedUpNovel.author;
       if (lookedUpNovel.authorId) $('manual-authorid').value = lookedUpNovel.authorId;
     }
-    note('manual-note', '已找到资料。'); return true;
+    note('manual-note', !authorOnly && (!lookedUpNovel.author || !lookedUpNovel.authorId) ? '已填入 Pixiv 返回的资料；未提供的作者字段可手动补充。' : '已自动填入资料。'); return true;
   } catch (error) { if (request === manualRequest) note('manual-note', error.message, true); return false; }
   finally { if (request === manualRequest) lockManual(false); }
 }
 $('lookup-novel').onclick = () => fillManual();
 $('lookup-author').onclick = () => fillManual(true);
+$('manual-translate').onclick = async () => {
+  const title = $('manual-title').value.trim();
+  if (!title) return note('manual-note', '请先识别作品或填写原文标题。', true);
+  const before = $('manual-zh').value;
+  if (!confirm(`${before ? '替换当前中文标题？\n' : ''}仅发送原文标题给 MyMemory 在线翻译，继续？`)) return;
+  const request = ++manualRequest;
+  const controller = new AbortController(); manualTranslateAbort = controller;
+  lockManual(true); note('manual-note', '正在翻译标题…');
+  try {
+    const zh = await mobileServices.translateMobile(title, mobileServices.languageFor(title), { signal: controller.signal });
+    if (request !== manualRequest || !$('manual').open) return;
+    $('manual-zh').value = zh;
+    note('manual-note', '译名已填入，确认后添加到书架。');
+  } catch (error) { if (request === manualRequest) note('manual-note', error.message, true); }
+  finally { if (request === manualRequest) lockManual(false); }
+};
+function openLookupSettings() {
+  $('lookup-endpoint').value = mobileLookup?.endpoint || '';
+  $('lookup-key').value = mobileLookup?.key || '';
+  note('lookup-settings-note'); show('lookup-settings');
+}
+$('settings-lookup').onclick = $('configure-lookup').onclick = openLookupSettings;
+$('lookup-settings-form').onsubmit = (event) => {
+  event.preventDefault();
+  try {
+    const config = mobileServices.lookupConfig($('lookup-endpoint').value, $('lookup-key').value);
+    if (!config) throw new Error('请输入识别服务地址和连接码。');
+    localStorage.setItem('shiyue-lookup', JSON.stringify(config));
+    mobileLookup = config; close('lookup-settings');
+  } catch (error) { note('lookup-settings-note', error.message, true); }
+};
+$('clear-lookup').onclick = () => {
+  try { localStorage.removeItem('shiyue-lookup'); mobileLookup = null; close('lookup-settings'); }
+  catch (error) { note('lookup-settings-note', error.message, true); }
+};
 $('manual-form').onsubmit = async (event) => {
   event.preventDefault();
   const id = parseNovel($('manual-id').value);
@@ -588,7 +658,7 @@ $('manual-form').onsubmit = async (event) => {
   lockManual(true);
   try {
     await mutate('import', { rows: [{ ...(lookedUpNovel?.id === id ? lookedUpNovel : {}), id, title: $('manual-title').value,
-      author: $('manual-author').value, authorId: $('manual-authorid').value }] });
+      author: $('manual-author').value, authorId: $('manual-authorid').value, zh: $('manual-zh').value }] });
     if (request === manualRequest && $('manual').open) { close('manual'); pickView('all'); openEditor(id); }
   } catch (error) { if (request === manualRequest) note('manual-note', error.message, true); }
   finally { if (request === manualRequest) lockManual(false); }
@@ -611,6 +681,8 @@ function stars() {
   });
   $('stars').replaceChildren(...items);
 }
+let editTranslateAbort;
+$('editor').addEventListener('close', () => editTranslateAbort?.abort());
 function openEditor(id) {
   const row = state.rows.find((item) => item.id === id);
   if (!row) return;
@@ -630,6 +702,9 @@ function openEditor(id) {
   $('edit-meta').replaceChildren(byline, ' · ', extLink(`打开 Pixiv 原作 #${row.id} ↗`, workUrl(row.id)));
   $('edit-tags').replaceChildren(...['tags', 'bookmarkTags'].map((source) => tagGroup(visibleTags(row, source), source)));
   $('edit-zh').value = row.zh;
+  $('edit-details').open = true;
+  $('edit-translate').disabled = false;
+  if (mobileServices) $('edit-source').value = mobileServices.languageFor(row.title);
   $('edit-repo').value = row.repo;
   $('edit-level').value = row.level;
   $('edit-status').value = row.status;
@@ -646,6 +721,23 @@ function openEditor(id) {
   note('edit-note');
   show('editor');
 }
+$('edit-translate').onclick = async () => {
+  const row = editRow;
+  if (!row || !mobileServices) return;
+  const before = $('edit-zh').value;
+  if (!confirm(`${before ? '用新译文替换输入框中的中文标题？\n' : ''}将原文标题发给 MyMemory 翻译？不会发送作品编号、Repo 或收藏。`)) return;
+  const controller = new AbortController(); editTranslateAbort = controller;
+  const control = $('edit-translate'); control.disabled = true;
+  note('edit-note', '正在翻译标题…');
+  try {
+    const zh = await mobileServices.translateMobile(row.title, $('edit-source').value, { signal: controller.signal });
+    if (editRow !== row || controller.signal.aborted || !$('editor').open) return;
+    if ($('edit-zh').value !== before) return note('edit-note', '你已修改中文标题，未覆盖输入。');
+    $('edit-zh').value = zh;
+    note('edit-note', '译名已填入，可调整后保存作品。');
+  } catch (error) { if (!controller.signal.aborted) note('edit-note', error.message, true); }
+  finally { if (editTranslateAbort === controller) control.disabled = false; }
+};
 $('editor-form').onsubmit = async (event) => {
   event.preventDefault();
   if (!editRow) return;
@@ -773,10 +865,10 @@ const translationRows = () => availableTitles(state.rows, translateIds);
 function translationControls() {
   const count = translationRows().length;
   $('translate-summary').textContent = `${count} / ${translateIds.length} 个标题待译 · ${translateScope} · 不覆盖已有译名`;
-  for (const id of ['browser-translate', 'deepl-translate', 'translate-download', 'translate-copy']) $(id).disabled = !count || Boolean(translation);
+  for (const id of ['browser-translate', 'deepl-translate', 'mobile-translate', 'translate-download', 'translate-copy']) $(id).disabled = !count || Boolean(translation);
   $('browser-translate').disabled ||= !browserTranslation.size;
   $('translate-lang').disabled = Boolean(translation);
-  $('translate-method').textContent = browserStatus;
+  $('translate-method').textContent = mobileServices && !browserTranslation.size ? '在线翻译每批最多 15 个标题；也可以导入已有译文。' : browserStatus;
   $('translate-copy-label').textContent = `复制下一批${count ? `（${Math.min(count, copyBatchSize)} 个标题）` : ''}`;
   $('deepl-translate').hidden = !deepl;
   $('stop-translate').hidden = !translation;
@@ -788,7 +880,7 @@ async function checkBrowserTranslation() {
   browserTranslation = new Map();
   const secure = globalThis.isSecureContext;
   browserStatus = !secure ? '浏览器翻译仅支持 localhost 或 HTTPS。' : !native?.create ? '当前浏览器未提供内置翻译，可批量导入译文。' : '正在检查浏览器翻译…';
-  if (!deepl && !native?.create) $('translation-paste').open = true;
+  if (!deepl && !mobileServices && !native?.create) $('translation-paste').open = true;
   translationControls();
   if (!secure || !native?.create) return;
   const source = $('translate-lang').value;
@@ -805,7 +897,7 @@ async function checkBrowserTranslation() {
   browserTranslation = new Map(candidates.filter(Boolean));
   browserStatus = !browserTranslation.size ? '浏览器没有可用的翻译语言包。' : [...browserTranslation.values()].some(({ status }) => status === 'available')
     ? '浏览器翻译可用。' : '浏览器翻译可用，首次使用可能需要下载语言包。';
-  if (!browserTranslation.size && !deepl) $('translation-paste').open = true;
+  if (!browserTranslation.size && !deepl && !mobileServices) $('translation-paste').open = true;
   translationControls();
 }
 $('translate-lang').onchange = checkBrowserTranslation;
@@ -852,6 +944,23 @@ function finishTranslation(count, signal, failure = '') {
   note('translate-note', failure ? `已保存 ${count} 个。${failure}` : `${signal.aborted ? '已停止' : '已处理'}，保存 ${count} 个译名。${remaining ? `还有 ${remaining} 个待译。` : ''}`, Boolean(failure));
   if (!$('translate').open) toast($('translate-note').textContent, Boolean(failure));
 }
+$('mobile-translate').onclick = async () => {
+  if (!mobileServices || !confirm('将这一批原文标题发给 MyMemory 翻译？不会发送作品编号、Repo 或收藏。')) return;
+  const signal = startTranslation();
+  if (!signal) return;
+  const source = $('translate-lang').value;
+  const rows = translationRows().slice(0, 15);
+  let saved = 0, failure = '';
+  try {
+    for (const [i, row] of rows.entries()) {
+      if (signal.aborted) break;
+      note('translate-note', `正在翻译 ${i + 1} / ${rows.length}…`);
+      const zh = await mobileServices.translateMobile(row.title, source === 'auto' ? mobileServices.languageFor(row.title) : source, { signal });
+      if (!signal.aborted) saved += await mutate('translation', { translations: [{ ...row, zh }] });
+    }
+  } catch (error) { if (!signal.aborted) failure = error.message; }
+  finishTranslation(saved, signal, failure);
+};
 $('deepl-translate').onclick = async () => {
   if (!confirm('使用 DeepL 会把所选作品的原文标题发送给 DeepL，不会发送 Repo 或收藏夹。继续吗？')) return;
   const signal = startTranslation();
@@ -962,7 +1071,11 @@ function configureOffline() {
   $('brand-caption').textContent = '离线小说书架';
   $('offline-status').hidden = false;
   $('offline-status').textContent = '正在准备离线资源…';
-  $('lookup-novel').hidden = true;
+  for (const id of ['configure-lookup', 'settings-lookup', 'manual-translate', 'edit-translate', 'edit-language', 'mobile-translate']) $(id).hidden = false;
+  try {
+    const config = JSON.parse(localStorage.getItem('shiyue-lookup') || 'null');
+    if (config) mobileLookup = mobileServices.lookupConfig(config.endpoint, config.key);
+  } catch { /* A stale connection can be reconfigured. */ }
   const install = $('install-shelf');
   let prompt;
   window.addEventListener('beforeinstallprompt', (event) => { event.preventDefault(); prompt = event; install.hidden = false; });
@@ -975,8 +1088,16 @@ function configureOffline() {
       if ((await event.userChoice).outcome === 'accepted') await navigator.storage?.persist?.();
     } catch (error) { note('settings-note', error.message, true); }
   };
-  offlineStore.prepareOffline().then(() => {
-    $('offline-status').textContent = '离线资源已就绪 · 书架仅保存在本机';
+  offlineStore.prepareOffline().then((registration) => {
+    $('offline-status').textContent = '离线资源已就绪 · 书架仅保存在本机 · 书封版 2.0';
+    const checkUpdate = () => { $('shelf-update').hidden = !registration.waiting; };
+    checkUpdate();
+    registration.addEventListener('updatefound', () => registration.installing?.addEventListener('statechange', checkUpdate));
+    $('apply-shelf-update').onclick = () => {
+      if ($('editor').open || translation) return note('settings-note', '请先保存作品或停止翻译，再应用新版。', true);
+      navigator.serviceWorker.addEventListener('controllerchange', () => location.reload(), { once: true });
+      registration.waiting?.postMessage('ACTIVATE_SHELF_UPDATE');
+    };
   }).catch((error) => { $('offline-status').textContent = error.message; });
 }
 $('login-form').onsubmit = async (event) => {
@@ -992,7 +1113,7 @@ setInterval(() => { if (!document.hidden) refresh().catch(() => {}); }, 12000);
 let startupFailed = false;
 try {
   if (offlineEdition) {
-    offlineStore = await import('./offline-store.mjs');
+    [offlineStore, mobileServices] = await Promise.all([import('./offline-store.mjs'), import('./mobile-services.mjs')]);
     await enter(); configureOffline();
   } else if (location.pathname === '/share') await publicShare();
   else {

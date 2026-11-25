@@ -1,5 +1,16 @@
 export const idOf = (id) => /^[1-9]\d{0,24}$/.test(String(id ?? '')) ? String(id) : '';
 export const workUrl = (id) => `https://www.pixiv.net/novel/show.php?id=${idOf(id)}`;
+export function novelIdFrom(value) {
+  const text = String(value ?? '').trim();
+  if (idOf(text)) return idOf(text);
+  try {
+    const url = new URL(text);
+    if (url.protocol !== 'https:' || url.port || url.username || url.password) return '';
+    if (url.hostname === 'www.pixiv.net' && url.pathname === '/novel/show.php') return idOf(url.searchParams.get('id'));
+    if (url.hostname === 'pixiv.net' && url.pathname === '/novel/show.php') return idOf(url.searchParams.get('id'));
+  } catch { /* The field accepts only an ID or a Pixiv novel URL. */ }
+  return '';
+}
 export const authorUrl = (id) => `https://www.pixiv.net/users/${idOf(id)}`;
 export const norm = (text) => String(text ?? '').normalize('NFKC').toLowerCase().trim();
 export const textOf = (text, max = 1000) => typeof text === 'string' ? text.trim().slice(0, max) : '';
