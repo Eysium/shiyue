@@ -1,4 +1,4 @@
-import { idOf, norm, filterRows, formatExport, workUrl, authorUrl, statuses, tagSources, availableTitles,
+import { applyImport, cleanNovel, readTags, idOf, norm, filterRows, formatExport, workUrl, authorUrl, statuses, tagSources, availableTitles,
   bilingualTitle, catalogAuthors, catalogTags, isHiddenTag, seriesKey, seriesUrl, novelIdFrom as parseNovel } from './model.mjs';
 
 // BEGIN GENERATED LUCIDE ICONS
@@ -158,7 +158,10 @@ function pickView(value, { history = true, series = '' } = {}) {
   setSidebar(false);
   render(true);
 }
-window.addEventListener('hashchange', () => { if (location.pathname !== '/share') pickView(hashView(), { history: false }); });
+window.addEventListener('hashchange', () => {
+  if (offlineEdition && loggedIn && location.hash.startsWith('#via-novel=')) receiveViaWork();
+  else if (location.pathname !== '/share') pickView(hashView(), { history: false });
+});
 window.addEventListener('popstate', () => { if (location.pathname !== '/share' && view !== hashView()) pickView(hashView(), { history: false }); });
 $('authors-back').onclick = () => pickView('authors');
 function navItem(id, name, glyph, count) {
@@ -396,7 +399,7 @@ function render(reset = false) {
     $('empty-title').textContent = authors.size ? '没有匹配的作者' : '还没有可统计的作者';
     $('empty-copy').textContent = authors.size ? '试试作者名或 Pixiv 作者 ID。' : '导入含作者 ID 的作品后，会在这里汇总。';
     $('empty-action').textContent = authors.size ? '查看所有作者' : '导入作品';
-    $('empty-action').onclick = authors.size ? () => pickView('authors') : openImport;
+    $('empty-action').onclick = authors.size ? () => pickView('authors') : () => openImport();
     selection(); return;
   }
   visible = filterRows(rows, { query, ...filters, hiddenTags: state.hiddenTags, authorId, series: activeSeries, folder: folder?.id,
@@ -421,7 +424,7 @@ function render(reset = false) {
   $('empty-title').textContent = rows.length ? '没有匹配的作品' : '书架还没有作品';
   $('empty-copy').textContent = rows.length ? '试试调整标签、关键词或阅读状态。' : '从 Pixiv 导入收藏，或手动添加一篇小说。';
   $('empty-action').textContent = rows.length ? '返回全部作品' : '导入作品';
-  $('empty-action').onclick = rows.length ? () => pickView('all') : openImport;
+  $('empty-action').onclick = rows.length ? () => pickView('all') : () => openImport();
   const popular = (tagIndex.tags ?? []).filter(({ name }) => !isHiddenTag(state.hiddenTags, 'tags', name))
     .sort((a, b) => b.count - a.count || titleCollator.compare(a.name, b.name)).slice(0, 8).map(({ name }) => name);
   const quick = popular.map((name) => tagChip(name, true));
@@ -525,38 +528,102 @@ $('catalog-source').onchange = resetTagCatalog;
 $('catalog-hidden').onchange = resetTagCatalog;
 $('catalog-more').onclick = () => { catalogLimit += 40; renderTagCatalog(); };
 
-function openImport() {
-  note('import-note'); $('import-file').value = ''; $('restore-mode').checked = false; show('importer');
-}
-$('import-open').onclick = openImport;
-function importResult(result) { return `新增 ${result.added} 篇，更新 ${result.updated} 篇，${result.unchanged} 篇未变${result.skipped ? `，跳过 ${result.skipped} 条重复或无效记录` : ''}。`; }
-$('import-run').onclick = async () => {
-  const file = $('import-file').files[0];
-  if (!file) return note('import-note', '请选择 JSON 文件。', true);
-  if (file.size > 16 * 1024 * 1024) return note('import-note', '单个文件最多 16 MB。', true);
+let importDraft;
+let viaWork;
+let importRevision = 0;
+function resetImportPreview() {
+  importRevision++;
+  importDraft = undefined;
   $('import-run').disabled = true;
+  $('import-tag-options').hidden = $('restore-mode').checked;
+  note('import-note');
+}
+function openImport(work = null) {
+  viaWork = work;
+  $('import-file').value = ''; $('import-text').value = ''; $('restore-mode').checked = false;
+  $('import-tag-mode').value = 'replace'; $('import-source').hidden = Boolean(work);
+  $('import-via').hidden = !work;
+  $('import-via').textContent = work ? `从 Via 收到：${work.title} · #${work.id}` : '';
+  resetImportPreview(); show('importer');
+  if (work) $('import-preview').click();
+}
+$('import-open').onclick = () => openImport();
+for (const id of ['import-file', 'import-text', 'restore-mode', 'import-tag-mode']) $(id).addEventListener('input', resetImportPreview);
+function importResult(result) { return `新增 ${result.added} 篇，更新 ${result.updated} 篇，${result.unchanged} 篇未变${result.skipped ? `，跳过 ${result.skipped} 条重复或无效记录` : ''}。`; }
+$('import-preview').onclick = async () => {
+  resetImportPreview();
+  const revision = importRevision;
+  note('import-note', '正在检查资料…');
+  try {
+    const file = $('import-file').files[0];
+    const pasted = $('import-text').value.trim();
+    const limit = 16 * 1024 * 1024;
+    if (!viaWork && !file && !pasted) throw new Error('请选择 JSON 文件或粘贴资料。');
+    if (file && pasted) throw new Error('请选择文件或粘贴文本中的一种。');
+    if (file?.size > limit || new Blob([pasted]).size > limit) throw new Error('作品资料最多 16 MB。');
+    const input = viaWork ? { rows: [viaWork] } : JSON.parse((file ? await file.text() : pasted).replace(/^\uFEFF/, ''));
+    if (revision !== importRevision || !$('importer').open) return;
+    const restore = $('restore-mode').checked;
+    if (restore) {
+      if (state.rows.length || state.folders.length) throw new Error('完整恢复仅适用于空书架。');
+      if (input?.type !== 'pixiv-repo-web' || !Array.isArray(input.rows) || !Array.isArray(input.folders)) throw new Error('请选择拾页的完整备份。');
+      importDraft = { route: 'restore', input };
+      note('import-note', `准备恢复 ${input.rows.length} 篇作品和 ${input.folders.length} 个收藏夹。`);
+    } else {
+      const payload = { rows: Array.isArray(input) ? input : input?.rows ?? input?.novels, tagMode: $('import-tag-mode').value };
+      const result = applyImport({ rows: state.rows.map((row) => ({ ...row })) }, payload);
+      const missingTags = input?.workTagsMissing || (viaWork && viaWork.tags === undefined);
+      const missingBookmarkTags = input?.bookmarkTagsMissing || (viaWork && viaWork.bookmarkTags === undefined);
+      const warnings = [missingTags && '缺少原标签的作品会保留站内记录。', missingBookmarkTags && '缺少收藏标签的作品会保留站内记录。', input?.incomplete?.length && '数据有部分缺漏，此次仅导入已取得的作品。'].filter(Boolean);
+      note('import-note', `预计${importResult(result)}${warnings.join('')}`);
+      importDraft = { route: 'import', input: payload, workId: viaWork?.id };
+    }
+    $('import-run').disabled = false;
+  } catch (error) { if (revision === importRevision) note('import-note', error.message, true); }
+};
+$('import-run').onclick = async () => {
+  const draft = importDraft;
+  if (!draft) return;
+  const revision = importRevision;
+  importDraft = undefined;
+  $('import-run').disabled = true;
+  $('import-preview').disabled = true;
   note('import-note', '正在导入…');
   try {
-    const input = JSON.parse((await file.text()).replace(/^\uFEFF/, ''));
-    const restore = $('restore-mode').checked;
-    const result = await mutate(restore ? 'restore' : 'import', input);
-    const missing = Number.isSafeInteger(input?.workTagsMissing) && input.workTagsMissing > 0 ? ` ${input.workTagsMissing} 篇缺少 Pixiv 原标签，将保留站内已有的原标签。` : '';
-    note('import-note', restore ? `已恢复 ${result} 篇作品。` : importResult(result) + missing);
-  } catch (error) { note('import-note', error.message, true); }
-  finally { $('import-run').disabled = false; }
+    const result = await mutate(draft.route, draft.input);
+    if (revision !== importRevision || !$('importer').open) return;
+    const message = draft.route === 'restore' ? `已恢复 ${result} 篇作品。` : importResult(result);
+    note('import-note', message);
+    if (draft.workId) { close('importer'); openEditor(draft.workId); toast(message); }
+  } catch (error) {
+    if (revision === importRevision) { importDraft = draft; $('import-run').disabled = false; note('import-note', error.message, true); }
+  } finally { $('import-preview').disabled = false; }
 };
+function receiveViaWork() {
+  const prefix = '#via-novel=';
+  if (!location.hash.startsWith(prefix)) return;
+  const fragment = location.hash.slice(prefix.length);
+  history.replaceState(null, '', `${location.pathname}${location.search}`);
+  try {
+    const work = fragment.length <= 32000 && cleanNovel(JSON.parse(decodeURIComponent(fragment)));
+    if (!work) throw new Error('作品资料无效。');
+    openImport(work);
+  } catch { toast('Via 作品资料无法读取，请回到 Pixiv 重新发送，或改用 JSON 导入。', true); }
+}
+const tagsFromField = (id) => readTags($(id).value.split(/\r?\n/)) ?? [];
 let lookedUpNovel = null;
 let manualRequest = 0;
 let manualLookupAbort;
 let manualTranslateAbort;
 function updateManualLink() {
   const id = parseNovel($('manual-id').value);
+  $('lookup-novel-label').textContent = offlineEdition && !mobileLookup ? '去 Pixiv 取资料' : '识别并填入';
   $('manual-original').hidden = !id;
-  if (id) $('manual-original').href = workUrl(id);
+  if (id) $('manual-original').href = workUrl(id) + (offlineEdition ? '#shiyue-capture' : '');
   else $('manual-original').removeAttribute('href');
 }
 function lockManual(locked) {
-  for (const id of ['manual-id', 'manual-authorid', 'manual-title', 'manual-author', 'manual-zh', 'lookup-novel', 'lookup-author', 'manual-translate', 'manual-save']) $(id).disabled = locked;
+  for (const id of ['manual-id', 'manual-authorid', 'manual-title', 'manual-author', 'manual-zh', 'manual-tags', 'manual-bookmark-tags', 'lookup-novel', 'lookup-author', 'manual-translate', 'manual-save']) $(id).disabled = locked;
 }
 $('manual-id').oninput = () => {
   $('manual-zh').value = '';
@@ -564,6 +631,9 @@ $('manual-id').oninput = () => {
     if ($('manual-title').value === lookedUpNovel.title) $('manual-title').value = '';
     if ($('manual-author').value === lookedUpNovel.author) $('manual-author').value = '';
     if ($('manual-authorid').value === lookedUpNovel.authorId) $('manual-authorid').value = '';
+    for (const [field, key] of [['manual-tags', 'tags'], ['manual-bookmark-tags', 'bookmarkTags']]) {
+      if ($(field).value === (lookedUpNovel[key] ?? []).join('\n')) $(field).value = '';
+    }
     lookedUpNovel = null;
   }
   updateManualLink();
@@ -572,10 +642,10 @@ $('manual-id').oninput = () => {
 $('manual-id').onkeydown = (event) => {
   if (event.key !== 'Enter' || event.isComposing || event.repeat) return;
   event.preventDefault();
-  if (!$('lookup-novel').disabled) fillManual();
+  if (!$('lookup-novel').disabled) $('lookup-novel').click();
 };
 $('manual').addEventListener('close', () => { if (!$('manual').open) { manualRequest++; manualLookupAbort?.abort(); manualTranslateAbort?.abort(); lockManual(false); } });
-$('add-open').onclick = () => { $('manual-form').reset(); lookedUpNovel = null; updateManualLink(); note('manual-note'); show('manual'); };
+$('add-open').onclick = () => { $('manual-form').reset(); $('manual-pixiv-details').open = false; lookedUpNovel = null; updateManualLink(); note('manual-note'); show('manual'); };
 async function fillManual(authorOnly = false) {
   const id = parseNovel($('manual-id').value);
   const authorValue = $('manual-authorid').value.trim();
@@ -594,7 +664,7 @@ async function fillManual(authorOnly = false) {
     try { data = await api('lookup', query); }
     catch (error) {
       if (!offlineEdition || error.status !== 404) throw error;
-      if (!mobileLookup) throw new Error('新作品的自动识别需要联网并配置 Pixiv 识别服务，也可以在下方手动填资料。');
+      if (!mobileLookup) throw new Error('用 Via 打开原作，再从「拾页工具」发送；也可以在下方手填。云识别需要另行配置。');
       data = await mobileServices.lookupMobile(mobileLookup, query, { signal: controller.signal });
     }
     if (request !== manualRequest || !$('manual').open) return false;
@@ -605,12 +675,18 @@ async function fillManual(authorOnly = false) {
       $('manual-title').value = lookedUpNovel.title;
       if (lookedUpNovel.author) $('manual-author').value = lookedUpNovel.author;
       if (lookedUpNovel.authorId) $('manual-authorid').value = lookedUpNovel.authorId;
+      if (lookedUpNovel.tags) $('manual-tags').value = lookedUpNovel.tags.join('\n');
+      if (lookedUpNovel.bookmarkTags) $('manual-bookmark-tags').value = lookedUpNovel.bookmarkTags.join('\n');
     }
     note('manual-note', !authorOnly && (!lookedUpNovel.author || !lookedUpNovel.authorId) ? '已填入 Pixiv 返回的资料；未提供的作者字段可手动补充。' : '已自动填入资料。'); return true;
   } catch (error) { if (request === manualRequest) note('manual-note', error.message, true); return false; }
   finally { if (request === manualRequest) lockManual(false); }
 }
-$('lookup-novel').onclick = () => fillManual();
+$('lookup-novel').onclick = () => {
+  const id = parseNovel($('manual-id').value);
+  if (offlineEdition && !mobileLookup && id && !state.rows.some((row) => row.id === id)) $('manual-original').click();
+  else fillManual();
+};
 $('lookup-author').onclick = () => fillManual(true);
 $('manual-translate').onclick = async () => {
   const title = $('manual-title').value.trim();
@@ -640,11 +716,11 @@ $('lookup-settings-form').onsubmit = (event) => {
     const config = mobileServices.lookupConfig($('lookup-endpoint').value, $('lookup-key').value);
     if (!config) throw new Error('请输入识别服务地址和连接码。');
     localStorage.setItem('shiyue-lookup', JSON.stringify(config));
-    mobileLookup = config; close('lookup-settings');
+    mobileLookup = config; updateManualLink(); close('lookup-settings');
   } catch (error) { note('lookup-settings-note', error.message, true); }
 };
 $('clear-lookup').onclick = () => {
-  try { localStorage.removeItem('shiyue-lookup'); mobileLookup = null; close('lookup-settings'); }
+  try { localStorage.removeItem('shiyue-lookup'); mobileLookup = null; updateManualLink(); close('lookup-settings'); }
   catch (error) { note('lookup-settings-note', error.message, true); }
 };
 $('manual-form').onsubmit = async (event) => {
@@ -658,7 +734,8 @@ $('manual-form').onsubmit = async (event) => {
   lockManual(true);
   try {
     await mutate('import', { rows: [{ ...(lookedUpNovel?.id === id ? lookedUpNovel : {}), id, title: $('manual-title').value,
-      author: $('manual-author').value, authorId: $('manual-authorid').value, zh: $('manual-zh').value }] });
+      author: $('manual-author').value, authorId: $('manual-authorid').value, zh: $('manual-zh').value,
+      tags: tagsFromField('manual-tags'), bookmarkTags: tagsFromField('manual-bookmark-tags') }] });
     if (request === manualRequest && $('manual').open) { close('manual'); pickView('all'); openEditor(id); }
   } catch (error) { if (request === manualRequest) note('manual-note', error.message, true); }
   finally { if (request === manualRequest) lockManual(false); }
@@ -668,7 +745,8 @@ function editorValues() {
   return { zh: $('edit-zh').value, repo: $('edit-repo').value, score: editScore, level: $('edit-level').value,
     status: $('edit-status').value, favorite: $('edit-favorite').checked,
     folders: [...$('edit-folders').querySelectorAll('input:checked')].map((item) => item.value),
-    labels: $('edit-labels').value.split(/[,，、\n]/).map((item) => item.trim()).filter(Boolean) };
+    labels: $('edit-labels').value.split(/[,，、\n]/).map((item) => item.trim()).filter(Boolean),
+    tags: tagsFromField('edit-source-tags'), bookmarkTags: tagsFromField('edit-bookmark-tags') };
 }
 function stars() {
   const items = Array.from({ length: 5 }, (_, i) => {
@@ -699,7 +777,10 @@ function openEditor(id) {
       if ($('editor').open) event.preventDefault(); else navigate(event);
     };
   }
-  $('edit-meta').replaceChildren(byline, ' · ', extLink(`打开 Pixiv 原作 #${row.id} ↗`, workUrl(row.id)));
+  const original = workUrl(row.id);
+  const links = [byline, ' · ', extLink(`打开 Pixiv 原作 #${row.id} ↗`, original)];
+  if (offlineEdition) links.push(' · ', extLink('去 Pixiv 更新资料 ↗', `${original}#shiyue-capture`));
+  $('edit-meta').replaceChildren(...links);
   $('edit-tags').replaceChildren(...['tags', 'bookmarkTags'].map((source) => tagGroup(visibleTags(row, source), source)));
   $('edit-zh').value = row.zh;
   $('edit-details').open = true;
@@ -710,6 +791,9 @@ function openEditor(id) {
   $('edit-status').value = row.status;
   $('edit-favorite').checked = row.favorite;
   $('edit-labels').value = row.labels.join('、');
+  $('edit-pixiv-details').open = false;
+  $('edit-source-tags').value = row.tags.join('\n');
+  $('edit-bookmark-tags').value = row.bookmarkTags.join('\n');
   $('edit-folders').replaceChildren(...state.folders.map(({ id, name }) => {
     const label = element('label', undefined, 'check');
     const input = element('input'); input.type = 'checkbox'; input.value = id; input.checked = row.folders.includes(id);
@@ -1071,7 +1155,7 @@ function configureOffline() {
   $('brand-caption').textContent = '离线小说书架';
   $('offline-status').hidden = false;
   $('offline-status').textContent = '正在准备离线资源…';
-  for (const id of ['configure-lookup', 'settings-lookup', 'manual-translate', 'edit-translate', 'edit-language', 'mobile-translate']) $(id).hidden = false;
+  for (const id of ['configure-lookup', 'settings-lookup', 'manual-via-help', 'manual-translate', 'edit-translate', 'edit-language', 'mobile-translate']) $(id).hidden = false;
   try {
     const config = JSON.parse(localStorage.getItem('shiyue-lookup') || 'null');
     if (config) mobileLookup = mobileServices.lookupConfig(config.endpoint, config.key);
@@ -1089,7 +1173,7 @@ function configureOffline() {
     } catch (error) { note('settings-note', error.message, true); }
   };
   offlineStore.prepareOffline().then((registration) => {
-    $('offline-status').textContent = '离线资源已就绪 · 书架仅保存在本机 · 书封版 2.0';
+    $('offline-status').textContent = '离线资源已就绪 · 书架仅保存在本机 · 书封版 2.1';
     const checkUpdate = () => { $('shelf-update').hidden = !registration.waiting; };
     checkUpdate();
     registration.addEventListener('updatefound', () => registration.installing?.addEventListener('statechange', checkUpdate));
@@ -1114,7 +1198,7 @@ let startupFailed = false;
 try {
   if (offlineEdition) {
     [offlineStore, mobileServices] = await Promise.all([import('./offline-store.mjs'), import('./mobile-services.mjs')]);
-    await enter(); configureOffline();
+    await enter(); configureOffline(); receiveViaWork();
   } else if (location.pathname === '/share') await publicShare();
   else {
     const session = await api('session'); deepl = session.deepl;

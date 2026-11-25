@@ -55,7 +55,7 @@ export function catalogAuthors(rows) {
   return authors;
 }
 
-function readTags(value, depth = 0) {
+export function readTags(value, depth = 0) {
   if (Array.isArray(value)) {
     const tags = [...new Set(value.slice(0, 100).map((item) => textOf(item, 120) || textOf(item?.tag, 120) || textOf(item?.name, 120)).filter(Boolean))];
     return tags.length || !value.length ? tags : undefined;
@@ -100,7 +100,14 @@ export function applyImport(state, incoming) {
     }
     const metadata = { ...clean };
     for (const key of ['author', 'authorId', 'series', 'seriesId', 'seriesOrder', 'visibility']) if (!metadata[key]) delete metadata[key];
-    for (const key of ['tags', 'bookmarkTags']) if (metadata[key] === undefined) delete metadata[key];
+    for (const key of ['tags', 'bookmarkTags']) {
+      if (metadata[key] === undefined) delete metadata[key];
+      else if (incoming?.tagMode === 'merge') {
+        const tags = new Map((previous[key] ?? []).map((name) => [norm(name), name]));
+        for (const name of metadata[key]) tags.set(norm(name), name);
+        metadata[key] = [...tags.values()].slice(0, 100);
+      }
+    }
     if (Object.keys(metadata).every((key) => JSON.stringify(metadata[key]) === JSON.stringify(previous[key]))) {
       counts.unchanged++;
       continue;

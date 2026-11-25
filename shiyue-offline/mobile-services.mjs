@@ -33,6 +33,7 @@ export function lookupConfig(endpoint, key) {
   if (!endpoint.trim() && !key.trim()) return null;
   let url;
   try { url = new URL(endpoint.trim()); } catch { /* Report a single setup error below. */ }
+  if (url && ['pixiv.net', 'www.pixiv.net'].includes(url.hostname)) throw new Error('这是 Pixiv 原作网址。可把它填到「添加作品」，再用 Via 打开原作。');
   if (url?.protocol !== 'https:' || !url.hostname.endsWith('.workers.dev') || url.port || url.username || url.password || url.pathname !== '/' || url.search || url.hash || !/^[A-Za-z0-9_-]{24,128}$/.test(key.trim())) {
     throw new Error('请输入 workers.dev HTTPS 根网址及至少 24 位的连接码。');
   }

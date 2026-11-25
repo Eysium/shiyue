@@ -263,11 +263,17 @@ dialog.editor { width: min(900px, calc(100% - 24px)); }
 .lookup-input button { white-space: nowrap; min-height: 41px; }
 .lookup-input button.icon-button { min-height: 38px; }
 .manual-footer { display: flex; justify-content: flex-end; border-top: 1px solid var(--line); padding-top: 9px; }
+.lookup-help { font-size: .85rem; margin: 7px 0 0; }
+.source-tag-fields, .import-paste { margin-top: 12px; }
+.source-tag-fields > summary, .import-paste > summary { cursor: pointer; color: var(--accent); padding-block: 10px; }
+.source-tag-fields textarea, .import-paste textarea { width: 100%; min-height: 64px; max-height: 220px; }
+.import-via { padding: 12px 14px; border-radius: 8px; color: var(--ink); background: var(--tint); overflow-wrap: anywhere; }
 @media (max-width: 680px) {
   .shelf-display { margin-bottom: 6px; }
   .workspace .rows[data-display=covers]:not(:empty) { grid-template-columns: minmax(0, 1fr); gap: 9px; }
   .workspace .rows[data-display=covers] h2 { min-height: 79px; gap: 5px; padding-block: 9px; }
   #manual { width: 100%; max-width: 100%; max-height: calc(100dvh - env(safe-area-inset-top, 0px)); margin: auto 0 0; border-radius: 8px 8px 0 0; }
-  #manual input { font-size: 16px; }
+  #manual input, .source-tag-fields textarea, .import-paste textarea { font-size: 16px; }
+  .source-tag-fields > summary, .import-paste > summary { min-height: 44px; }
   .manual-footer { padding-bottom: env(safe-area-inset-bottom, 0px); }
 }

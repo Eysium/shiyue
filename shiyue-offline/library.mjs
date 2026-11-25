@@ -1,4 +1,4 @@
-import { applyImport, cleanNovel, idOf, levels, norm, statuses, tagSources, textOf } from './model.mjs';
+import { applyImport, cleanNovel, idOf, levels, norm, readTags, statuses, tagSources, textOf } from './model.mjs';
 
 export const emptyShelf = () => ({ rows: [], folders: [], revision: 0, lastImport: 0 });
 const error = (status, message) => { throw Object.assign(new Error(message), { status }); };
@@ -17,6 +17,9 @@ function patchRow(state, row, patch) {
   if (Object.hasOwn(patch, 'favorite')) row.favorite = patch.favorite === true;
   if (Array.isArray(patch.folders)) row.folders = [...new Set(patch.folders)].filter((id) => state.folders.some((folder) => folder.id === id));
   if (Array.isArray(patch.labels)) row.labels = [...new Set(patch.labels.slice(0, 35).map((label) => textOf(label, 100)).filter(Boolean))];
+  for (const source of ['tags', 'bookmarkTags']) {
+    if (Array.isArray(patch[source])) row[source] = readTags(patch[source]) ?? [];
+  }
   row.touched = Date.now();
   row.rev++;
 }

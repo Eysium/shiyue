@@ -1,4 +1,4 @@
-const version = 'a3c6f53584e4372e';
+const version = 'ddb27aac2376418e';
 const prefix = `shiyue:${new URL(self.registration.scope).pathname}:`;
 const active = prefix + version;
 const paths = ["./app.mjs","./model.mjs","./library.mjs","./offline-store.mjs","./mobile-services.mjs","./style.css","./shelf.svg","./manifest.webmanifest","./icon-192.png","./icon-512.png","./index.html"];
